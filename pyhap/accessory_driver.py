@@ -56,6 +56,7 @@ CHAR_STAT_OK = 0
 SERVICE_COMMUNICATION_FAILURE = -70402
 SERVICE_CALLBACK = 0
 SERVICE_CALLBACK_DATA = 1
+HAP_SERVICE_TYPE = '_hap._tcp.local.'
 
 
 def callback(func):
@@ -70,7 +71,7 @@ def is_callback(func):
 
 
 def iscoro(func):
-    """Check if the function is a coroutine or if the function is a ``functools.patial``,
+    """Check if the function is a coroutine or if the function is a ``functools.partial``,
     check the wrapped function for the same.
     """
     if isinstance(func, functools.partial):
@@ -86,11 +87,21 @@ class AccessoryMDNSServiceInfo(ServiceInfo):
         self.state = state
 
         adv_data = self._get_advert_data()
+        # Append part of MAC address to prevent name conflicts
+        name = '{} {}.{}'.format(
+            self.accessory.display_name,
+            self.state.mac[-8:].replace(':', ''),
+            HAP_SERVICE_TYPE
+        )
         super().__init__(
-            '_hap._tcp.local.',
-            self.accessory.display_name + '._hap._tcp.local.',
-            socket.inet_aton(self.state.address), self.state.port,
-            0, 0, adv_data)
+            HAP_SERVICE_TYPE,
+            name=name,
+            port=self.state.port,
+            weight=0,
+            priority=0,
+            properties=adv_data,
+            addresses=[socket.inet_aton(self.state.address)]
+        )
 
     def _setup_hash(self):
         setup_hash_material = self.state.setup_id + self.state.mac
@@ -133,7 +144,8 @@ class AccessoryDriver:
     def __init__(self, *, address=None, port=51234,
                  persist_file='accessory.state', pincode=None,
                  encoder=None, loader=None, loop=None, mac=None,
-                 listen_address=None, advertised_address=None, interface_choice=None):
+                 listen_address=None, advertised_address=None, interface_choice=None,
+                 zeroconf_instance=None):
         """
         Initialize a new AccessoryDriver object.
 
@@ -175,22 +187,33 @@ class AccessoryDriver:
 
         :param interface_choice: The zeroconf interfaces to listen on.
         :type InterfacesType: [InterfaceChoice.Default, InterfaceChoice.All]
+
+        :param zeroconf_instance: A Zeroconf instance. When running multiple accessories or
+            bridges a single zeroconf instance can be shared to avoid the overhead
+            of processing the same data multiple times.
         """
-        if sys.platform == 'win32':
-            self.loop = loop or asyncio.ProactorEventLoop()
+        if loop is None:
+            if sys.platform == 'win32':
+                loop = asyncio.ProactorEventLoop()
+            else:
+                loop = asyncio.new_event_loop()
+
+            executor_opts = {'max_workers': None}
+            if sys.version_info >= (3, 6):
+                executor_opts['thread_name_prefix'] = 'SyncWorker'
+
+            self.executor = ThreadPoolExecutor(**executor_opts)
+            loop.set_default_executor(self.executor)
         else:
-            self.loop = loop or asyncio.new_event_loop()
+            self.executor = None
 
-        executor_opts = {'max_workers': None}
-        if sys.version_info >= (3, 6):
-            executor_opts['thread_name_prefix'] = 'SyncWorker'
-
-        self.executor = ThreadPoolExecutor(**executor_opts)
-        self.loop.set_default_executor(self.executor)
+        self.loop = loop
 
         self.accessory = None
         self.http_server_thread = None
-        if interface_choice is not None:
+        if zeroconf_instance is not None:
+            self.advertiser = zeroconf_instance
+        elif interface_choice is not None:
             self.advertiser = Zeroconf(interfaces=interface_choice)
         else:
             self.advertiser = Zeroconf()
@@ -199,9 +222,11 @@ class AccessoryDriver:
         self.topics = {}  # topic: set of (address, port) of subscribed clients
         self.topic_lock = threading.Lock()  # for exclusive access to the topics
         self.loader = loader or Loader()
-        self.aio_stop_event = asyncio.Event(loop=self.loop)
+        self.aio_stop_event = asyncio.Event(loop=loop)
         self.stop_event = threading.Event()
-        self.event_queue = queue.Queue()  # (topic, bytes)
+        self.event_queue = (
+            queue.SimpleQueue() if hasattr(queue, "SimpleQueue") else queue.Queue()  # pylint: disable=no-member
+        )
         self.send_event_thread = None  # the event dispatch thread
         self.sent_events = 0
         self.accumulated_qsize = 0
@@ -220,7 +245,7 @@ class AccessoryDriver:
         self.http_server = HAPServer(network_tuple, self)
 
     def start(self):
-        """Start the event loop and call `_do_start`.
+        """Start the event loop and call `start_service`.
 
         Pyhap will be stopped gracefully on a KeyBoardInterrupt.
         """
@@ -234,7 +259,7 @@ class AccessoryDriver:
             else:
                 logger.debug('Not setting a child watcher. Set one if '
                              'subprocesses will be started outside the main thread.')
-            self.add_job(self._do_start)
+            self.add_job(self.start_service)
             self.loop.run_forever()
         except KeyboardInterrupt:
             logger.debug('Got a KeyboardInterrupt, stopping driver')
@@ -245,7 +270,7 @@ class AccessoryDriver:
             self.loop.close()
             logger.info('Closed the event loop')
 
-    def _do_start(self):
+    def start_service(self):
         """Starts the accessory.
 
         - Call the accessory's run method.
@@ -303,9 +328,11 @@ class AccessoryDriver:
     async def async_stop(self):
         """Stops the AccessoryDriver and shutdown all remaining tasks."""
         await self.async_add_job(self._do_stop)
-        logger.debug('Shutdown executors')
-        self.executor.shutdown()
-        self.loop.stop()
+        # Executor=None means a loop wasn't passed in
+        if self.executor is not None:
+            logger.debug('Shutdown executors')
+            self.executor.shutdown()
+            self.loop.stop()
         logger.debug('Stop completed')
 
     def _do_stop(self):
@@ -455,10 +482,19 @@ class AccessoryDriver:
             #
             topic, bytedata, sender_client_addr = self.event_queue.get()
             subscribed_clients = self.topics.get(topic, [])
-            logger.debug('Send event: topic(%s), data(%s), sender_client_addr(%s)', topic, bytedata, sender_client_addr)
+            logger.debug(
+                'Send event: topic(%s), data(%s), sender_client_addr(%s)',
+                topic,
+                bytedata,
+                sender_client_addr
+            )
             for client_addr in subscribed_clients.copy():
                 if sender_client_addr and sender_client_addr == client_addr:
-                    logger.debug('Skip sending event to client since its the client that made the characteristic change: %s', client_addr)
+                    logger.debug(
+                        'Skip sending event to client since '
+                        'its the client that made the characteristic change: %s',
+                        client_addr
+                    )
                     continue
                 logger.debug('Sending event to client: %s', client_addr)
                 pushed = self.http_server.push_event(bytedata, client_addr)
@@ -467,7 +503,8 @@ class AccessoryDriver:
                                  client_addr)
                     # Maybe consider removing the client_addr from every topic?
                     self.subscribe_client_topic(client_addr, topic, False)
-            self.event_queue.task_done()
+            if hasattr(self.event_queue, "task_done"):
+                self.event_queue.task_done()  # pylint: disable=no-member
             self.sent_events += 1
             self.accumulated_qsize += self.event_queue.qsize()
 
@@ -509,8 +546,7 @@ class AccessoryDriver:
     def pair(self, client_uuid, client_public):
         """Called when a client has paired with the accessory.
 
-        Updates the accessory with the paired client and updates the mDNS service. Also,
-        persist the new state.
+        Persist the new accessory state.
 
         :param client_uuid: The client uuid.
         :type client_uuid: uuid.UUID
@@ -527,17 +563,12 @@ class AccessoryDriver:
         logger.info("Paired with %s.", client_uuid)
         self.state.add_paired_client(client_uuid, client_public)
         self.persist()
-        # Safe mode added to avoid error during pairing, see
-        # https://github.com/home-assistant/home-assistant/issues/14567
-        if not self.safe_mode:
-            self.update_advertisement()
         return True
 
     def unpair(self, client_uuid):
         """Removes the paired client from the accessory.
 
-        Updates the accessory and updates the mDNS service. Persist the new accessory
-        state.
+        Persist the new accessory state.
 
         :param client_uuid: The client uuid.
         :type client_uuid: uuid.UUID
@@ -545,6 +576,24 @@ class AccessoryDriver:
         logger.info("Unpairing client %s.", client_uuid)
         self.state.remove_paired_client(client_uuid)
         self.persist()
+
+    def finish_pair(self):
+        """Finishing pairing or unpairing.
+
+        Updates the accessory and updates the mDNS service.
+
+        The mDNS announcement must not be updated until AFTER
+        the final pairing response is sent or homekit will
+        see that the accessory is already paired and assume
+        it should stop pairing.
+        """
+        # Safe mode added to avoid error during pairing, see
+        # https://github.com/home-assistant/home-assistant/issues/14567
+        #
+        # This may no longer be needed now that we defer
+        # updating the advertisement until after the final
+        # pairing response is sent.
+        #
         if not self.safe_mode:
             self.update_advertisement()
 
@@ -607,16 +656,30 @@ class AccessoryDriver:
         :rtype: dict
         """
         chars = []
-        for id in char_ids:
-            aid, iid = (int(i) for i in id.split('.'))
-            rep = {HAP_REPR_AID: aid, HAP_REPR_IID: iid}
-            char = self.accessory.get_characteristic(aid, iid)
+        for aid_iid in char_ids:
+            aid, iid = (int(i) for i in aid_iid.split("."))
+            rep = {
+                HAP_REPR_AID: aid,
+                HAP_REPR_IID: iid,
+                HAP_REPR_STATUS: SERVICE_COMMUNICATION_FAILURE,
+            }
+
             try:
-                rep[HAP_REPR_VALUE] = char.get_value()
-                rep[HAP_REPR_STATUS] = CHAR_STAT_OK
+                if aid == STANDALONE_AID:
+                    char = self.accessory.iid_manager.get_obj(iid)
+                    available = True
+                else:
+                    acc = self.accessory.accessories.get(aid)
+                    available = acc.available
+                    char = acc.iid_manager.get_obj(iid)
+
+                if available:
+                    rep[HAP_REPR_VALUE] = char.get_value()
+                    rep[HAP_REPR_STATUS] = CHAR_STAT_OK
             except CharacteristicError:
                 logger.error("Error getting value for characteristic %s.", id)
-                rep[HAP_REPR_STATUS] = SERVICE_COMMUNICATION_FAILURE
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("Unexpected error getting value for characteristic %s.", id)
 
             chars.append(rep)
         logger.debug("Get chars response: %s", chars)

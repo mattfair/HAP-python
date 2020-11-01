@@ -38,16 +38,10 @@ class Accessory:
             standalone AID. Defaults to None, in which case the `AccessoryDriver`
             will assign the standalone AID to this `Accessory`.
         :type aid: int
-
-        :param setup_id: Setup ID can be provided, although, per spec, should be random
-            every time the instance is started. If not provided on init, will be random.
-            4 digit string 0-9 A-Z
-        :type setup_id: str
         """
         self.aid = aid
         self.display_name = display_name
         self.driver = driver
-        self.reachable = True
         self.services = []
         self.iid_manager = IIDManager()
 
@@ -72,7 +66,18 @@ class Accessory:
         .. deprecated:: 2.0
            Initialize the service inside the accessory `init` method instead.
         """
-        pass
+
+    @property
+    def available(self):
+        """Accessory is available.
+
+        If available is False, get_characteristics will return
+        SERVICE_COMMUNICATION_FAILURE for the accessory which will
+        show as unavailable.
+
+        Expected to be overridden.
+        """
+        return True
 
     def add_info_service(self):
         """Helper method to add the required `AccessoryInformation` service.
@@ -244,12 +249,12 @@ class Accessory:
                   flush=True)
             print(QRCode(xhm_uri).terminal(quiet_zone=2), flush=True)
             print('Or enter this code in your HomeKit app on your iOS device: '
-                  '{}'.format(pincode))
+                  '{}'.format(pincode), flush=True)
         else:
             print('To use the QR Code feature, use \'pip install '
-                  'HAP-python[QRCode]\'')
+                  'HAP-python[QRCode]\'', flush=True)
             print('Enter this code in your HomeKit app on your iOS device: {}'
-                  .format(pincode))
+                  .format(pincode), flush=True)
 
     @staticmethod
     def run_at_interval(seconds):
@@ -270,7 +275,7 @@ class Accessory:
         def _repeat(func):
             async def _wrapper(self, *args):
                 while True:
-                    self.driver.async_add_job(func, self, *args)
+                    await self.driver.async_add_job(func, self, *args)
                     if await util.event_wait(
                             self.driver.aio_stop_event, seconds):
                         break
@@ -283,14 +288,12 @@ class Accessory:
         Called when HAP server is running, advertising is set, etc.
         Can be overridden with a normal or async method.
         """
-        pass
 
     async def stop(self):
         """Called when the Accessory should stop what is doing and clean up any resources.
 
         Can be overridden with a normal or async method.
         """
-        pass
 
     # Driver
 

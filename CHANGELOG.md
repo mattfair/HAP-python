@@ -16,6 +16,52 @@ Sections
 ### Developers
 -->
 
+## [3.0.0] - 2020-07-25
+
+### Added
+- Support for multiple camera streams. [#273](https://github.com/ikalchev/HAP-python/pull/273)
+
+### Changed
+- Use SimpleQueue instead of Queue when available (performance improvements). [#274](https://github.com/ikalchev/HAP-python/pull/274)
+
+### Fixed
+- Make sure accessory setup code appears when running under systemd. [#276](https://github.com/ikalchev/HAP-python/pull/276)
+
+## [2.9.2] - 2020-07-05
+
+### Added
+- Improve event loop handling. [#270](https://github.com/ikalchev/HAP-python/pull/270)
+- Auto-detect the IP address in the camera demo so it can work out of the box. [#268](https://github.com/ikalchev/HAP-python/pull/268)
+
+### Fixed
+- Correctly handling of a single byte read request. [#267](https://github.com/ikalchev/HAP-python/pull/267)
+
+## [2.9.1] - 2020-05-31
+
+### Added
+- Add compatibility with zeroconf 0.27. [#263](https://github.com/ikalchev/HAP-python/pull/263)
+
+## [2.9.0] - 2020-05-29
+
+### Fixed
+- Fix random disconnect after upgrade to encrypted. [#253](https://github.com/ikalchev/HAP-python/pull/253)
+- Convert the characteristic UUID to string only once. [#256](https://github.com/ikalchev/HAP-python/pull/256)
+- Fix pairing failure - split read/write encryption upgrade. [#258](https://github.com/ikalchev/HAP-python/pull/258)
+- Allow negotiated framerate to be used - add "-framerate" parameterto avfoundation. [#260](https://github.com/ikalchev/HAP-python/pull/260)
+
+### Added
+- Add support for unavailable accessories. [#252](https://github.com/ikalchev/HAP-python/pull/252)
+
+### Developers
+- Cleanup and fixes for python 3.7 and 3.8. Enable pylint in Travis. [#255](https://github.com/ikalchev/HAP-python/pull/255)
+
+## [2.8.4] - 2020-05-12
+
+### Fixed
+- Fix race condition that causes pairing and unpairing failures. [#246](https://github.com/ikalchev/HAP-python/pull/246)
+- Fix loop on dropped connections that causes temporary stalls and connection loss. [#249](https://github.com/ikalchev/HAP-python/pull/249)
+- Fix exception on missing video fields. [#245](https://github.com/ikalchev/HAP-python/pull/245)
+
 ## [2.8.3] - 2020-05-01
 
 ### Fixed
